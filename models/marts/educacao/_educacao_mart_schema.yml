@@ -1,0 +1,197 @@
+version: 2
+
+
+models:
+  - name: mart_educacao__efeito_diferencial_disciplina
+    description: |
+      Tabela mart principal para efeito-escola diferencial por (escola, disciplina, ano_letivo).
+      Método: demeaning intra-aluno-ano + shrinkage
+      Volumetria: 1.347 em dev (Inglês NULL).
+      Uso: filtrar por confianca_estatistica='significativo' para rankings; combinar com classificacao para magnitude.
+      Interpretação: efeito_ajustado relativo intra-aluno-ano; não somar ou comparar magnitudes entre disciplinas.
+    config:
+      alias: efeito_diferencial_disciplina
+      contract:
+        enforced: true
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - escola_id
+              - disciplina
+              - ano_letivo
+          config:
+            severity: error
+
+      - dbt_expectations.expect_column_mean_to_be_between:
+          arguments:
+            column_name: efeito_ajustado
+            min_value: -0.1
+            max_value: 0.1
+          config:
+            severity: "{{ 'error' if target.name == 'prod_bq' else 'warn' }}"
+
+      - dbt_expectations.expect_column_stdev_to_be_between:
+          arguments:
+            column_name: efeito_ajustado
+            min_value: 0
+            max_value: 2
+          config:
+            severity: "{{ 'error' if target.name == 'prod_bq' else 'warn' }}"
+
+    columns:
+      # Testes em marts (TABLE): `constraints` para `not_null`,
+      # forçado por DDL no BigQuery sem custo extra. Apenas testes `accepted_values`,
+      # `dbt_utils.*` e `dbt_expectations.*` em `tests:` (não cobertos pelo contract).
+      # Reduz ~14 queries por build, mantendo proteção. Padrão dbt para contratos de dados
+      # em tabelas. Para views (4 intermediates), `not_null` permanece em `tests:` pois
+      # BigQuery não suporta `NOT NULL` em CREATE VIEW.
+      - name: escola_id
+        description: "ID único da Escola. Chave primária composta. INT64."
+        data_type: int64
+        constraints:
+          - type: not_null
+
+      - name: disciplina
+        description: "Nome da disciplina {Português, Ciências, Inglês, Matemática}. Chave primária composta. STRING."
+        data_type: string
+        constraints:
+          - type: not_null
+        tests:
+          - accepted_values:
+              arguments:
+                values: "{{ var('disciplinas_disponiveis') }}"
+              config:
+                severity: error
+
+      - name: ano_letivo
+        description: "Ano letivo de referência. Chave primária composta. Coluna utilizada para particionamento da tabela (1 bucket/ano). INT64."
+        data_type: int64
+        constraints:
+          - type: not_null
+
+      - name: n_obs
+        description: "Número de observações. Quanto menor, maior o efeito do shrinkage (leva o efeito em direção ao zero)."
+        data_type: int64
+        constraints:
+          - type: not_null
+
+      - name: pct_obs_multi_escola
+        description: "Fração de `n_obs` com `aluno_multi_escola = TRUE` (mobilidade intra-ano)."
+        data_type: float64
+        constraints:
+          - type: not_null
+
+      - name: efeito_bruto
+        description: |
+          `AVG(nota_demeanada)` propagado de
+          `int_efeito_bruto_por_escola_disciplina_ano`. sem ajuste de ruído.
+          Propriedade `SUM(efeito_brutoxn_obs)/SUM(n_obs) ≈ 0`
+          por (escola, ano) só vale com balanceamento perfeito + zero mobilidade. FLOAT64.
+        data_type: float64
+        constraints:
+          - type: not_null
+
+      - name: peso_shrinkage
+        description: |
+          Entre [0, 1]. `var_between_clamped / (var_between_clamped + var_within / n_obs)`.
+          Fração de sinal real sobre o total. Maior `n_obs` = maior peso. Monotonicidade
+          testada por `assert_shrinkage_monotonico_por_disciplina`. FLOAT64.
+        data_type: float64
+        constraints:
+          - type: not_null
+        tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 1
+              config:
+                severity: error
+
+      - name: efeito_ajustado
+        description: |
+          Entre [-5, 5]. `efeito_bruto x peso_shrinkage`.
+          Efeito-escola diferencial relativo ao padrão intra-aluno-ano.
+          Regras de uso (não somar entre disciplinas, não comparar magnitudes) na
+          descrição do modelo acima. Usado para ranking por
+          (escola, disciplina, ano), scatter e top-N. FLOAT64
+        data_type: float64
+        constraints:
+          - type: not_null
+        tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: -5
+                max_value: 5
+              config:
+                severity: error
+
+      - name: erro_padrao
+        description: |
+          "FLOAT64 >= 0. `SQRT((1 - peso_shrinkage) x var_between_clamped)`.
+          Aproximação assume normalidade e ignora incerteza na estimação das variâncias
+          - adequado apenas para triagem qualitativa,"
+        data_type: float64
+        constraints:
+          - type: not_null
+
+      - name: ic_inferior
+        description: "`efeito_ajustado - 1.96 x erro_padrao`. Limite inferior IC 95%. Informa incerteza. FLOAT64"
+        data_type: float64
+        constraints:
+          - type: not_null
+
+      - name: ic_superior
+        description: "`efeito_ajustado + 1.96 x erro_padrao`. Limite superior IC 95%. Informa incerteza. FLOAT64"
+        data_type: float64
+        constraints:
+          - type: not_null
+
+      - name: classificacao
+        description: |
+          A classificação é uma medida qualitativa da magnitude do efeito,
+          baseada apenas no valor de `efeito_ajustado` (não considera incerteza).
+          `forte_positivo` >= +0,30 · `moderado_positivo` (+0,10; +0,30) ·
+          `indistinguivel` [-0,10; +0,10] · `moderado_negativo` (-0,30; -0,10) ·
+          `forte_negativo` <= -0,30.
+          STRING
+        data_type: string
+        constraints:
+          - type: not_null
+        tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - forte_positivo
+                  - moderado_positivo
+                  - indistinguivel
+                  - moderado_negativo
+                  - forte_negativo
+              config:
+                severity: error
+
+      - name: confianca_estatistica
+        description: |
+          Classificação da confiança estatística.
+          "significativo` se IC 95% inteiro acima ou inteiro abaixo de zero;
+          `inconclusivo` se cruza zero. STRING."
+        data_type: string
+        constraints:
+          - type: not_null
+        tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - significativo
+                  - inconclusivo
+              config:
+                severity: error
+
+      - name: rank_na_disciplina
+        description: |
+          "Posição da escola em determinada disciplina, em determinado ano letivo.
+          `DENSE_RANK() OVER (PARTITION BY disciplina, ano_letivo ORDER BY efeito_ajustado DESC)`.
+          `DENSE_RANK` ao invés de RANK pois evita buracos em empates."
+        data_type: int64
+        constraints:
+          - type: not_null

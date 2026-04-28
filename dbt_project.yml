@@ -1,0 +1,119 @@
+# dbt_project.yml - Desafio RMI Educação
+
+# Target único `dev_bq`. Pass-through de schema via
+# `macros/generate_schema_name.sql`.
+
+name: 'rmi_educacao'
+version: '1.0.0'
+config-version: 2
+profile: 'rmi_educacao'
+
+require-dbt-version: [">=1.11.0", "<2.0.0"]
+
+model-paths: ["models"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+vars:
+  # dbt_date é dependência de dbt_expectations (várias macros de
+  # `dbt_expectations` chamam `dbt_date.now()` e `dbt_date.get_base_dates`).
+  # Este var configura o timezone usado por essas chamadas.
+  'dbt_date:time_zone': 'America/Sao_Paulo'
+
+  # Policy tags - desabilitadas para evitar custos.
+  # Quando ativar em produção, substitua os placeholders pelos IDs reais da taxonomia.
+  # As colunas sensíveis estão marcadas em schema.yml com `meta.policy_tags_planned`.
+  # A macro `apply_policy_tags()` é executada como post-hook quando habilitada.
+  # Nota: policy tags só funcionam em tabelas, não em views.
+  apply_policy_tags: false
+  policy_tag_identificador_direto: "projects/PROJECT_ID/locations/us/taxonomies/TAXONOMY_ID/policyTags/identificador_direto"
+  policy_tag_demografico: "projects/PROJECT_ID/locations/us/taxonomies/TAXONOMY_ID/policyTags/demografico"
+  policy_tag_dados_de_menores_desempenho: "projects/PROJECT_ID/locations/us/taxonomies/TAXONOMY_ID/policyTags/dados_de_menores_desempenho_academico"
+
+  # Parâmetros da análise
+
+  # Filtro de alunos no int_educacao__notas_demeanadas. Abaixo de 4 observações,
+  # o demeaning é pouco informativo. Override em dev = 3 se precisar
+  # de mais volumetria; manter 4 cobre os dois bimestres x duas disciplinas mínimo.
+  min_obs_por_aluno: 4
+
+  # Nomes das 4 disciplinas do domínio. Em dev-sample, Inglês sai
+  # do mart via `WHERE nota IS NOT NULL` na CTE `avaliacao_unpivot`
+  # de int_educacao__avaliacao_enriquecida (Inglês 100% NULL); este var é
+  # usado em `accepted_values`.
+  disciplinas_disponiveis: ['Português', 'Ciências', 'Inglês', 'Matemática']
+
+  # Range das notas. `[0, 10]` empiricamente confirmado
+  # na EDA. "Notas em [0,0; 10,0] O jitter de 0,2 mencionado no
+  # schema do bucket de anonimização é não alterou os limites.
+  nota_range: [0, 10]
+
+  # Threshold para a fração de turmas em stg_frequencia onde TODAS as
+  # linhas têm escola_id NULL (agregação por turma, não por linha). 5%
+  # cobre dev e prod, pois a métrica turma-level fica muito abaixo do
+  # percentual row-level de órfãos (~12% no sample em frequencia->turma).
+  max_pct_orfaos_frequencia_turma: 0.05
+
+  # Threshold do teste de órfãos avaliacao->turma_escola: 1% em prod.
+  # Em dev_bq, severidade condicional (warn/error) acomoda artefato de sample.
+  max_pct_orfaos_avaliacao_turma: 0.01
+
+  # Limites de classificação: 0,10 (detectabilidade mín), 0,30 (efeito forte).
+  classificacao_corte_fraco: 0.10
+  classificacao_corte_forte: 0.30
+
+models:
+  rmi_educacao:
+    +persist_docs:
+      relation: true
+      columns: true
+    # Aplica tags de política de dados quando habilitado. Somente funciona em
+    # tabelas (não em views). No ambiente dev, este recurso está desabilitado.
+    +post-hook:
+      - "{{ apply_policy_tags() }}"
+
+    staging:
+      +materialized: view
+      +schema: rmi_educacao_staging                    # pass-through via generate_schema_name
+      +tags: ["staging", "educacao"]
+      # Labels são aplicados automaticamente pelo dbt-bigquery nas views.
+      # O 'env: dev' está fixo aqui. Quando houver ambiente de produção,
+      # esse valor será parametrizado com `{{ target.name }}`.
+      +labels:
+        dominio: "educacao"
+        camada: "staging"
+        env: "dev"
+        owner: "rmi_educacao"
+
+    intermediate:
+      +materialized: view
+      +schema: rmi_educacao_intermediate
+      +tags: ["intermediate", "educacao"]
+      +labels:
+        dominio: "educacao"
+        camada: "intermediate"
+        env: "dev"
+        owner: "rmi_educacao"
+
+    marts:
+      +materialized: table
+      +schema: rmi_educacao_marts
+      +tags: ["mart", "educacao", "core"]
+      +labels:
+        dominio: "educacao"
+        camada: "mart"
+        lgpd: "dados_anonimizados"
+        env: "dev"
+        owner: "rmi_educacao"
+
+sources:
+  rmi_educacao:
+    +freshness:
+      warn_after: {count: 7, period: day}
+      error_after: {count: 30, period: day}

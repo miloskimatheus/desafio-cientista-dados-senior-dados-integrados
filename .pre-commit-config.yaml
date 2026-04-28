@@ -1,0 +1,66 @@
+# .pre-commit-config.yaml - hooks locais
+#
+# Protege contra:
+#   - Vazamento de secrets em `.env`, `profiles.yml` e afins (detect-secrets)
+#   - SQL malformatado (sqlfluff - dialeto bigquery, templater dbt)
+#   - YAML inválido (yamllint)
+#   - Arquivos grandes comitados por engano (>500 KB)
+#   - Whitespace/EOL inconsistentes
+#
+# Para instalar:
+#   pip install -r requirements-dev.txt
+#   pre-commit install
+#
+# Para rodar em todos os arquivos:
+#   pre-commit run --all-files
+#
+
+default_language_version:
+  python: python3.12
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.md$
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: check-yaml
+        args: ['--unsafe']     # permite tags custom do dbt (!env_var, etc.)
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: ^(\.venv|target|dbt_packages|exploratory_data_analysis/figures|results/figures)/
+
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.37.1
+    hooks:
+      - id: yamllint
+        args: ['-c', '.yamllint.yml']
+
+  # sqlfluff com templater dbt precisa do venv com dbt instalado - roda como
+  # hook local para usar o `.venv` do projeto em vez de criar um ambiente novo.
+  - repo: local
+    hooks:
+      - id: sqlfluff-fix
+        name: sqlfluff fix (bigquery + dbt templater)
+        entry: .venv/bin/sqlfluff fix --disable-progress-bar
+        language: system
+        types: [sql]
+        pass_filenames: true
+        require_serial: true
+
+      - id: sqlfluff-lint
+        name: sqlfluff lint (bigquery + dbt templater)
+        entry: .venv/bin/sqlfluff lint
+        language: system
+        types: [sql]
+        pass_filenames: true
+        require_serial: true

@@ -1,0 +1,187 @@
+version: 2
+
+
+models:
+  - name: stg_educacao__aluno
+    description: "Cadastro anonimizado de alunos. Grão: 1 linha por aluno (97.044)."
+    config:
+      alias: aluno
+    columns:
+      - name: aluno_id
+        description: "PK STRING - hex de hash com salt via `TO_HEX`."
+        data_type: string
+        config:
+          meta:
+            policy_tags_planned: ["{{ var('policy_tag_identificador_direto') }}"]
+        tests:
+          - unique:
+              config:
+                severity: error
+          - not_null:
+              config:
+                severity: error
+
+      - name: turma_id
+        description: "FK para `stg_educacao__turma.turma_id` (INT64). Relação 1:1 no sample."
+        data_type: int64
+
+      - name: faixa_etaria
+        description: "Faixa etária agrupada (ex. '0-5', '6-10', '11-14', '15-17', '18+')."
+        data_type: string
+        config:
+          meta:
+            policy_tags_planned: ["{{ var('policy_tag_demografico') }}"]
+
+      - name: aluno_bairro
+        description: "Hash INT64 do bairro (não joinável com `datario`)."
+        data_type: int64
+
+
+  - name: stg_educacao__turma
+    description: |
+      Relação (aluno, escola) - sem `escola_id`/`serie`/`turno`.
+      Grão: (aluno_id, turma_id) - 97.044 linhas.
+    config:
+      alias: turma
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - aluno_id
+              - turma_id
+          config:
+            severity: error
+    columns:
+      - name: aluno_id
+        description: "FK para `stg_educacao__aluno.aluno_id` (STRING hex)."
+        data_type: string
+        config:
+          meta:
+            policy_tags_planned: ["{{ var('policy_tag_identificador_direto') }}"]
+
+      - name: turma_id
+        description: "PK INT64 anonimizado."
+        data_type: int64
+
+      - name: ano_letivo
+        description: "INT64. Valor único `2000` no sample."
+        data_type: int64
+
+
+  - name: stg_educacao__frequencia
+    description: |
+      Frequência mensal por aluno x turma x disciplina. Grão pós-dedup:
+      (aluno_id, turma_id, disciplina, frequencia_data_inicio) - 2.725.108 linhas
+      (~88% do storage). Dedup via `QUALIFY ROW_NUMBER()` remove 2.556 grupos
+      de duplicatas.
+    config:
+      alias: frequencia
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - aluno_id
+              - turma_id
+              - disciplina
+              - frequencia_data_inicio
+          config:
+            severity: error
+    columns:
+      - name: escola_id
+        description: "INT64. Única staging com `(turma_id, escola_id)` juntos - fonte para `int_educacao__turma_escola` relacionar `turma_id com escola_id`."
+        data_type: int64
+
+      - name: aluno_id
+        description: "FK para `stg_educacao__aluno.aluno_id`. 0% órfãos no sample."
+        data_type: string
+        config:
+          meta:
+            policy_tags_planned: ["{{ var('policy_tag_identificador_direto') }}"]
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_educacao__aluno')
+                field: aluno_id
+              config:
+                severity: error  # órfão de aluno é sempre bug
+
+      - name: turma_id
+        description: "FK para `stg_educacao__turma.turma_id`. 12,41% órfãos no sample preservados via `LEFT JOIN` em `int_educacao__turma_escola`."
+        data_type: int64
+        tests:
+          - relationships:
+              arguments:
+                to: ref('stg_educacao__turma')
+                field: turma_id
+              config:
+                severity: "{{ 'error' if target.name == 'prod_bq' else 'warn' }}"
+
+      - name: frequencia_data_inicio
+        description: "DATE - início do período mensal de apuração."
+        data_type: date
+
+      - name: frequencia_data_fim
+        description: "DATE - fim do período mensal de apuração."
+        data_type: date
+
+      - name: disciplina
+        description: "Nome da disciplina em formato long (`disciplina_1`..`disciplina_4`)."
+        data_type: string
+
+      - name: frequencia_percentual
+        description: "Percentual de frequência do período (0..100). Degenerado no sample (p5 = 99,79%)."
+        data_type: float64
+
+
+  - name: stg_educacao__avaliacao
+    description: |
+      Notas bimestrais por aluno (wide - 4 colunas `disciplina_N`).
+      Grão pós-dedup: (aluno_id, bimestre) - 581 colisões (0,26%) removidas.
+    config:
+      alias: avaliacao
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - aluno_id
+              - bimestre
+          config:
+            severity: error
+    columns:
+      - name: aluno_id
+        description: "FK para `stg_educacao__aluno.aluno_id`."
+        data_type: string
+        config:
+          meta:
+            policy_tags_planned: ["{{ var('policy_tag_identificador_direto') }}"]
+
+      - name: turma_id
+        description: "FK para `stg_educacao__turma.turma_id`. Usado no dedup."
+        data_type: int64
+
+      - name: bimestre
+        description: "INT64 {1, 2, 3, 4}."
+        data_type: int64
+        tests:
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4]
+                quote: false
+              config:
+                severity: error
+
+      - name: disciplina_1
+        description: "Nota em Português pós-jitter +-0,2."
+        data_type: float64
+
+      - name: disciplina_2
+        description: "Nota em Ciências pós-jitter +-0,2."
+        data_type: float64
+
+      - name: disciplina_3
+        description: "Nota em Inglês pós-jitter +-0,2. **100% NULL no sample**"
+        data_type: float64
+
+      - name: disciplina_4
+        description: "Nota em Matemática pós-jitter +-0,2."
+        data_type: float64

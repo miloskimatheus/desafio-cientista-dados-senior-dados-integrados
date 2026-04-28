@@ -1,0 +1,12 @@
+[sqlfluff]
+dialect = bigquery
+templater = dbt
+runaway_limit = 10
+max_line_length = 100
+
+[sqlfluff:templater:dbt]
+project_dir = ./
+# profiles_dir não é hardcoded: resolução segue `DBT_PROFILES_DIR` (CI e pre-commit)
+# e `~/.dbt/` como fallback (dev local, onde copia profiles-example.yml).
+profile = rmi_educacao
+target = dev_bq

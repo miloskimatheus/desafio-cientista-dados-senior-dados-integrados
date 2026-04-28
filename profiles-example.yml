@@ -1,0 +1,26 @@
+# profiles-example.yml - template de perfil dbt
+#
+# Como usar:
+#   1. `gcloud auth application-default login` - autentica via browser
+#   2. `export DBT_GCP_PROJECT=<seu-projeto-sandbox>` - ou coloque em `.env`
+#   3. Copie este arquivo:
+#        cp profiles-example.yml ~/.dbt/profiles.yml
+#      ou use `--profiles-dir ./` em todos os comandos dbt.
+#
+# Nunca comite o `profiles.yml` real.
+#
+
+rmi_educacao:
+  target: dev_bq
+  outputs:
+    dev_bq:
+      type: bigquery
+      method: oauth                                      # ADC - sem keyfile
+      project: "{{ env_var('DBT_GCP_PROJECT') }}"        # preencher via `.env`
+      dataset: rmi_educacao_staging                      # default; modelos usam `+schema`
+      location: US                                       # alinhado com `datario:dados_mestres`
+      threads: 4
+      timeout_seconds: 300
+      priority: interactive
+      job_retries: 2
+      maximum_bytes_billed: 10000000000                  # 10 GB

@@ -1,0 +1,321 @@
+version: 2
+
+
+models:
+  - name: int_educacao__turma_escola
+    description: |
+      Relaciona `turma_id -> escola_id` via `SELECT DISTINCT` em `stg_educacao__frequencia`
+      (única staging que carrega ambas as colunas juntas).
+      Grão: 1 linha por turma.
+    config:
+      alias: turma_escola
+      contract:
+        enforced: true
+    columns:
+      # Política de testes:
+      # - TABLE: not_null via constraints (DDL NOT NULL).
+      # - VIEW: not_null via tests (runtime).
+      - name: turma_id
+        description: "ID da turma do aluno. PK INT64."
+        data_type: int64
+        tests:
+          - unique:
+              config:
+                severity: error
+          - not_null:
+              config:
+                severity: error
+
+      - name: escola_id
+        description: "ID da escola do aluno. INT64."
+        data_type: int64
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+
+  - name: int_educacao__avaliacao_enriquecida
+    description: |
+      Esta tabela transforma dados de avaliações de formato largo para longo, adicionando o ID da escola, ano letivo e uma flag de indicando se o aluno esteve em mais de uma escola no ano.
+      Grão: uma nota por linha para cada aluno, bimestre e disciplina.
+    config:
+      alias: avaliacao_enriquecida
+      contract:
+        enforced: true
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - aluno_id
+              - bimestre
+              - disciplina
+          config:
+            severity: error
+    columns:
+      - name: aluno_id
+        description: "ID do aluno. FK para `stg_educacao__aluno.aluno_id` (STRING hex)."
+        data_type: string
+        config:
+          meta:
+            policy_tags_planned: ["{{ var('policy_tag_identificador_direto') }}"]
+
+      - name: turma_id
+        description: "ID da turma do aluno. FK INT64. Vem da avaliação original."
+        data_type: int64
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: escola_id
+        description: "ID da escola. INT64."
+        data_type: int64
+
+      - name: ano_letivo
+        description: "Ano letivo. INT64. Em dev-sample: 2000 fixo."
+        data_type: int64
+
+      - name: bimestre
+        description: "INT64 {1, 2, 3, 4}."
+        data_type: int64
+
+      - name: disciplina
+        description: "Nome da disciplina. STRING. Valores em var('disciplinas_disponiveis'): {Português, Ciências, Inglês, Matemática}."
+        data_type: string
+
+      - name: nota
+        description: "Nota bimestral pós-jitter +-0,2. FLOAT64"
+        data_type: float64
+        config:
+          meta:
+            policy_tags_planned: ["{{ var('policy_tag_dados_de_menores_desempenho') }}"]
+        tests:
+          - not_null:
+              config:
+                severity: error
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: "{{ var('nota_range')[0] }}"
+                max_value: "{{ var('nota_range')[1] }}"
+              config:
+                severity: error
+
+      - name: aluno_multi_escola
+        description: "TRUE se aluno aparece com 2+ `escola_id` distintas no mesmo ano. BOOL. "
+        data_type: boolean
+
+
+  - name: int_educacao__notas_demeanadas
+    description: |
+      Calcula a nota média do aluno por ano, bimestre e disciplina.
+      Cada ano é tratado separadamente.
+      Filtra alunos com pelo menos {{ var('min_obs_por_aluno') }} observações
+      e com pelo menos duas disciplinas.
+      O resultado é materializado como `table` para evitar recomputação.
+    config:
+      alias: notas_demeanadas
+      contract:
+        enforced: true
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - aluno_id
+              - turma_id
+              - ano_letivo
+              - bimestre
+              - disciplina
+          config:
+            severity: error
+    columns:
+      - name: aluno_id
+        description: "ID do aluno. FK STRING hex."
+        data_type: string
+        config:
+          meta:
+            policy_tags_planned: ["{{ var('policy_tag_identificador_direto') }}"]
+        constraints:
+          - type: not_null
+
+      - name: turma_id
+        description: "ID da turma do aluno. FK INT64. Vem da avaliação original."
+        data_type: int64
+        constraints:
+          - type: not_null
+
+      - name: escola_id
+        description: "ID da Escola. Propagado de `int_avaliacao_enriquecida`. INT64."
+        data_type: int64
+
+      - name: ano_letivo
+        description: "Ano letivo. INT64. Define partition key do mart downstream. Em dev: 2000 fixo."
+        data_type: int64
+        constraints:
+          - type: not_null
+
+      - name: bimestre
+        description: "INT64 {1,2,3,4}."
+        data_type: int64
+        constraints:
+          - type: not_null
+
+      - name: disciplina
+        description: "Nome da disciplina (STRING)."
+        data_type: string
+        constraints:
+          - type: not_null
+
+      - name: nota
+        description: "FLOAT64 - pós-jitter."
+        data_type: float64
+        config:
+          meta:
+            policy_tags_planned: ["{{ var('policy_tag_dados_de_menores_desempenho') }}"]
+        constraints:
+          - type: not_null
+
+      - name: media_aluno
+        description: "`AVG(nota) OVER (PARTITION BY aluno_id, ano_letivo)` - base do demeaning."
+        data_type: float64
+        constraints:
+          - type: not_null
+
+      - name: nota_demeanada
+        description: "`nota - media_aluno`. Propriedade: `AVG(nota_demeanada)` por (aluno, ano) ≡ 0 (testado por `assert_demeaning_soma_zero`)."
+        data_type: float64
+        config:
+          meta:
+            policy_tags_planned: ["{{ var('policy_tag_dados_de_menores_desempenho') }}"]
+        constraints:
+          - type: not_null
+
+      - name: n_obs_aluno
+        description: "`COUNT(*) OVER (PARTITION BY aluno_id, ano_letivo)`. Pós-`QUALIFY`, sempre `>= var('min_obs_por_aluno')`."
+        data_type: int64
+        constraints:
+          - type: not_null
+
+      - name: aluno_multi_escola
+        description: "Propagado de `int_avaliacao_enriquecida`. BOOL."
+        data_type: boolean
+        constraints:
+          - type: not_null
+
+
+  - name: int_educacao__efeito_bruto_por_escola_disciplina_ano
+    description: |
+      Agregação do efeito bruto por escola, disciplina e ano letivo. Compartilhado por modelos de variância e efeito diferencial para evitar reprocessamento duplicado em produção. Filtro remove registros órfãos em desenvolvimento.
+    config:
+      alias: efeito_bruto_por_escola_disciplina_ano
+      contract:
+        enforced: true
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - escola_id
+              - disciplina
+              - ano_letivo
+          config:
+            severity: error
+    columns:
+      # int_efeito_bruto é VIEW - `not_null` via `tests:`.
+      - name: escola_id
+        description: "INT64. Não-NULL pela CTE upstream."
+        data_type: int64
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: disciplina
+        description: "Nome da disciplina (STRING)."
+        data_type: string
+
+      - name: ano_letivo
+        description: "INT64. Em dev: 2000 fixo."
+        data_type: int64
+
+      - name: efeito_bruto
+        description: "`AVG(nota_demeanada)` por (escola, disciplina, ano). É utilizado no shrinkage `mart` e no ss_within em `int_variancia`."
+        data_type: float64
+
+      - name: n_obs
+        description: "Quantidade de linhas de `int_notas_demeanadas` agrupadas por escola, disciplina e ano letivo. Determina a intensidade do shrinkage no modelo mart."
+        data_type: int64
+        tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+              config:
+                severity: error
+
+      - name: pct_obs_multi_escola
+        description: "Fração de `n_obs` com `aluno_multi_escola = TRUE`. Entre [0, 1]. Diagnóstico de mobilidade no mart."
+        data_type: float64
+        tests:
+          - not_null:
+              config:
+                severity: error
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 1
+              config:
+                severity: error
+
+
+  - name: int_educacao__variancia_por_disciplina
+    description: |
+      Cálculo da variância por (disciplina, ano_letivo). Saída: uma linha por (disciplina, ano_letivo). Em dev-sample: 3 linhas.
+      Componentes calculados: var_within, n_eff, var_between.
+    config:
+      alias: variancia_por_disciplina
+      contract:
+        enforced: true
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - disciplina
+              - ano_letivo
+          config:
+            severity: error
+    columns:
+      # int_variancia é VIEW - `not_null` via `tests:`.
+      - name: disciplina
+        description: "Nome da disciplina (STRING). PK composta com `ano_letivo`."
+        data_type: string
+
+      - name: ano_letivo
+        description: "INT64. PK composta. Em dev: 2000 fixo."
+        data_type: int64
+
+      - name: var_total
+        description: "`VAR_SAMP(nota_demeanada)` por (disciplina, ano_letivo)."
+        data_type: float64
+
+      - name: var_within
+        description: "Variância dentro das escolas (ruído). `ss_within / df_within`."
+        data_type: float64
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: var_between
+        description: "Variância entre escolas (sinal). `VAR_SAMP(efeito_bruto) - var_within / n_eff`)."
+        data_type: float64
+        tests:
+          - not_null:
+              config:
+                severity: error
+
+      - name: n_eff
+        description: "`n` efetivo balanceado (média harmônica). Termo do denominador de `var_between`."
+        data_type: float64
+        tests:
+          - not_null:
+              config:
+                severity: error

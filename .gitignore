@@ -1,0 +1,59 @@
+# Credenciais GCP
+# mantidos caso alguém opte por
+# Service Account no futuro (ex habilitar CI)
+*-sa*.json
+*keyfile*.json
+*service-account*.json
+*gcp-credentials*.json
+application_default_credentials.json
+
+# Variáveis de ambiente
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Profiles com credenciais reais
+profiles.yml
+!profiles-example.yml
+
+# Dados
+data/*.parquet
+data/*.csv
+data/*.json
+!data/.gitkeep
+
+# Virtualenv Python
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# dbt
+target/
+dbt_packages/
+logs/
+.user.yml
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Outputs de EDA / mart analysis
+exploratory_data_analysis/.ipynb_checkpoints/
+exploratory_data_analysis/*.html
+results/.ipynb_checkpoints/
+results/*.html

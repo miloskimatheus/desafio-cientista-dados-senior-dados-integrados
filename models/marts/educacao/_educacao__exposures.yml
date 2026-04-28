@@ -1,0 +1,67 @@
+version: 2
+
+# =============================================================================
+# Exposures - declaram consumidores downstream dos marts (ver REPORT.md §3.6).
+#
+# Em prod tornam o lineage navegável até o ponto de consumo (dashboard,
+# aplicação) e suportam alertas de impacto: se uma coluna some do mart, dbt
+# sinaliza quais exposures quebram. Aqui são *ilustrativas* - usos descritos
+# refletem a postura prod-grade do enunciado (DESAFIO.md), não sistemas
+# implantados. Owners com domínio `example.com` (RFC 2606).
+# =============================================================================
+
+exposures:
+  - name: dashboard_sme_efeito_escola
+    label: "SME — Painel de Efeito-Escola por Disciplina"
+    type: dashboard
+    maturity: medium
+    url: https://example.com/dashboards/sme-efeito-escola
+    description: |
+      Painel da Secretaria Municipal de Educação para inspeção do
+      ranking de escolas dentro de cada disciplina, com filtros
+      ortogonais por `classificacao` (5 rótulos por magnitude:
+      forte_positivo / moderado_positivo / indistinguivel /
+      moderado_negativo / forte_negativo) e por `confianca_estatistica`
+      (significativo / inconclusivo, baseado em o IC 95% cruzar zero).
+      Gestor pergunta "quais escolas têm efeito forte" (filtra
+      magnitude) ou "quais são robustas estatisticamente" (filtra
+      confiança) - as duas dimensões são independentes por design
+      (ver REPORT.md §3.3 sobre classificacao e confianca_estatistica
+      como dimensões ortogonais).
+
+      **Importante:** `efeito_ajustado` é diferencial intra-aluno —
+      nunca somar entre disciplinas (soma zero por construção); nunca
+      comparar magnitudes entre disciplinas da mesma escola.
+    depends_on:
+      - ref('mart_educacao__efeito_diferencial_disciplina')
+    owner:
+      name: Equipe de Analytics — SME-RJ
+      email: analytics-sme@example.com
+
+  - name: estudo_qualitativo_rmi
+    label: "RMI — Lista de escolas-candidatas a estudo qualitativo"
+    type: application
+    maturity: low
+    url: https://example.com/apps/estudo-qualitativo
+    description: |
+      Aplicação interna do RMI que materializa, periodicamente, uma
+      lista curta de escolas para visita técnica e entrevistas
+      qualitativas. Seleção sobre o mart:
+
+      1. Em `mart_educacao__efeito_diferencial_disciplina`: escolas
+         no topo de cada disciplina com `classificacao =
+         'forte_positivo'` E `confianca_estatistica = 'significativo'`.
+      2. Disciplinas com mais sinal entre escolas recebem prioridade
+         — `peso_shrinkage` do mart serve de proxy ordenável (peso
+         alto ⇒ `var_between` alto relativo a `var_within / n_obs`).
+         Para inspecionar `var_between` / `var_within` diretamente,
+         ler de `int_educacao__variancia_por_disciplina` via
+         `dbt docs` / lineage.
+
+      Lista é input para protocolo de pesquisa qualitativa; uso
+      ilustrativo, não automatiza decisão de política.
+    depends_on:
+      - ref('mart_educacao__efeito_diferencial_disciplina')
+    owner:
+      name: Equipe de Pesquisa — RMI
+      email: pesquisa-rmi@example.com

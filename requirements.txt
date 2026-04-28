@@ -1,0 +1,13 @@
+# requirements.txt - runtime mínimo do pipeline dbt
+#
+# Contém apenas o que é necessário para `dbt build` rodar end-to-end contra
+# BigQuery.
+#
+# Para instalar:
+#   python3.12 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+
+dbt-core==1.11.8
+dbt-bigquery==1.11.1

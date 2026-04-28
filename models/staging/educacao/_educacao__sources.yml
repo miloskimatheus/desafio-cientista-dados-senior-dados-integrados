@@ -1,0 +1,131 @@
+version: 2
+
+# Contrato de entrada dos 4 Parquets consumidos pelo pipeline
+#
+# Fonte: `bq load --replace` a partir de `gs://case_vagas/rmi/*.parquet`
+# (ver scripts/load_parquets_bq.sh - carrega só as 4 tabelas consumidas)
+# Tipos refletem o schema efetivo em BQ.
+#
+# Testes em nível source: nenhum.
+# Drift de schema (coluna removida/renomeada/com tipo alterado) é detectado
+# por dois mecanismos a montante deste arquivo, sem custo de query em BQ:
+#   1. `dbt parse` - referências em staging (`source('educacao', 'X').coluna`)
+#      falham em compile-time se a coluna some ou for renomeada.
+#   2. `bq load` - schema do Parquet é validado na ingestão; mudança de
+#      tipo incompatível aborta a carga antes de qualquer modelo rodar.
+#      Mudança de tipo compatível (ex.: STRING -> STRING wider) cascateia
+#      em `SAFE_CAST` na staging, virando NULL e sendo capturada pelos
+#      `not_null` downstream.
+#
+# Estratégia de freshness mista
+#
+# - Default (`aluno`, `turma`, `avaliacao`): freshness via metadata BQ
+#   (`loaded_at_field: null` -> `__TABLES__.last_modified_time`). No sample
+#   sempre passa porque `bq load --replace` é o evento de carga; em prod
+#   reflete a hora da última ingestão.
+#
+# - Override em `frequencia` usa `data_inicio` (período de apuração)
+#   como `loaded_at_field` derivado (`frequencia` é a única source com
+#   coluna temporal). Thresholds aqui são frouxos para
+#   acomodar sample com `data_inicio` de 2000
+#
+
+sources:
+  - name: educacao
+    description: "Dados educacionais anonimizados da rede municipal do Rio de Janeiro (RMI), carregados via `bq load --replace`. Apenas as 4 tabelas consumidas pelo pipeline são carregadas; `escola.parquet` do bucket é ignorado (nenhum modelo dbt o consome - escola_id é recuperado via stg_frequencia)."
+    database: "{{ env_var('DBT_GCP_PROJECT') }}"
+    schema: rmi_educacao_brutos
+    loader: bq load
+    config:
+      loaded_at_field: null
+      freshness:
+        warn_after: {count: 7, period: day}
+        error_after: {count: 30, period: day}
+
+    tables:
+      - name: aluno
+        description: "Cadastro de alunos com identificadores anonimizados. Grão: 1 linha por aluno (97.044 linhas)."
+        columns:
+          - name: id_aluno
+            description: "Identificador anonimizado do aluno (hash com salt, BYTES). PK da tabela; convertido para STRING via `TO_HEX` em staging."
+            data_type: bytes
+          - name: id_turma
+            description: "FK para `turma.id_turma` (hash com salt, INT64)."
+            data_type: int64
+          - name: faixa_etaria
+            description: "Faixa etária do aluno agrupada para evitar reidentificação (ex.: '0-5', '6-10', '11-14', '15-17', '18+'). Não consumida downstream - só `data_type` para catálogo."
+            data_type: string
+          - name: bairro
+            description: "Hash anonimizado do bairro de residência. Não é FK para `datario.dados_mestres.bairro`. Não consumida downstream - só `data_type` para catálogo."
+            data_type: int64
+
+      - name: turma
+        description: "Relação (aluno, turma) do ano letivo ( sample traz apenas `ano`, `id_turma`, `id_aluno`; sem `turno`/`serie`/`escola_id`). Grão: 1 linha por aluno (97.044 linhas)."
+        columns:
+          - name: ano
+            description: "Ano letivo anonimizado de forma determinística para 2000."
+            data_type: int64
+          - name: id_turma
+            description: "Identificador da turma (hash com salt, INT64). Parte do grão do roster."
+            data_type: int64
+          - name: id_aluno
+            description: "FK para `aluno.id_aluno` (BYTES). Parte do grão do roster."
+            data_type: bytes
+
+      - name: frequencia
+        description: "Registros mensais de frequência por aluno x turma x disciplina (grão real é período mensal, não dia letivo). 2,7M linhas - 88% do storage."
+        # Única source com coluna temporal materializada
+        # (`data_inicio`). Threshold frouxo (~30 anos warn / ~50 anos error)
+        # acomoda sample com ano=2000
+        config:
+          loaded_at_field: "timestamp(safe.parse_date('%Y-%m-%d', data_inicio))"
+          freshness:
+            warn_after: {count: 10950, period: day}
+            error_after: {count: 18250, period: day}
+        columns:
+          - name: id_escola
+            description: "FK para `escola.id_escola` (INT64). Única fonte que carrega `escola_id` junto de `turma_id` - base do `int_educacao__turma_escola`."
+            data_type: int64
+          - name: id_aluno
+            description: "FK para `aluno.id_aluno` (BYTES)."
+            data_type: bytes
+          - name: id_turma
+            description: "FK para `turma.id_turma` (INT64). 12,41% de órfãos contra `turma` no sample - tratado via `LEFT JOIN` em int."
+            data_type: int64
+          - name: data_inicio
+            description: "Data de início do período de apuração, STRING formato 'YYYY-MM-DD'. Parse em staging via `SAFE.PARSE_DATE`. Parte do grão pós-dedup."
+            data_type: string
+          - name: data_fim
+            description: "Data de fim do período de apuração, STRING formato 'YYYY-MM-DD'. Usada apenas como desempate em dedup; não consumida downstream - só `data_type` para catálogo."
+            data_type: string
+          - name: disciplina
+            description: "Nome da disciplina em formato long ('disciplina_1'..'disciplina_4'). Consumida apenas como chave de dedup; não flui para mart - só `data_type` para catálogo."
+            data_type: string
+          - name: frequencia
+            description: "Percentual de frequência do período (0..100). No sample é degenerado - p5=99,79%. Usada apenas como desempate em dedup; não consumida downstream - só `data_type` para catálogo."
+            data_type: float64
+
+      - name: avaliacao
+        description: "Notas bimestrais por aluno em formato wide (`disciplina_1..4`). 221.687 linhas. Notas com jitter +-0,2 do processo de anonimização."
+        columns:
+          - name: id_aluno
+            description: "FK para `aluno.id_aluno` (BYTES)."
+            data_type: bytes
+          - name: id_turma
+            description: "FK para `turma.id_turma` (INT64)."
+            data_type: int64
+          - name: bimestre
+            description: "Identificador do bimestre. STRING no Parquet ('1'..'4'), coagido para INT64 em staging."
+            data_type: string
+          - name: disciplina_1
+            description: "Nota em Português (wide). Pós-jitter +-0,2."
+            data_type: float64
+          - name: disciplina_2
+            description: "Nota em Ciências (wide). Pós-jitter +-0,2."
+            data_type: float64
+          - name: disciplina_3
+            description: "Nota em Inglês (wide). 100% NULL no sample."
+            data_type: float64
+          - name: disciplina_4
+            description: "Nota em Matemática (wide). Pós-jitter +-0,2."
+            data_type: float64

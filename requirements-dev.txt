@@ -1,0 +1,29 @@
+# requirements-dev.txt (análise exploratória + lint + pre-commit)
+#
+# Ferramentas necessárias para:
+#   - Rodar o notebook de EDA
+#   - Lint local (sqlfluff, yamllint)
+#   - Hooks de pre-commit (detect-secrets + sqlfluff + yamllint)
+#
+# Versões pinadas exatas por reprodutibilidade.
+#
+# Para instalar (depois de `requirements.txt`):
+#   pip install -r requirements-dev.txt
+#
+
+# EDA: leitura de Parquet + análise + plots
+pandas==2.3.3
+pyarrow==24.0.0
+polars==1.40.0
+matplotlib==3.10.8
+seaborn==0.13.2
+
+#  Notebooks
+jupyter==1.1.1
+
+# Lint + pre-commit
+sqlfluff==4.1.0
+sqlfluff-templater-dbt==4.1.0
+yamllint==1.37.1
+detect-secrets==1.5.0
+pre-commit==4.5.1
